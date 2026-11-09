@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Forecast</title>
+    <meta name="theme-color" content="#10233f">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/forecast.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./icons/forecast-192.png">
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            background: black;
+            color: white;
+            touch-action: manipulation;
+        }
+
+        .location-controls {
+            display: flex;
+            align-items: end;
+            flex-wrap: wrap;
+            gap: 8px;
+            padding: 8px;
+        }
+
+        .location-controls[hidden] {
+            display: none;
+        }
+
+        .location-controls label {
+            display: grid;
+            gap: 3px;
+            font-size: 12px;
+        }
+
+        .location-controls input,
+        .location-controls button {
+            min-width: 0;
+            padding: 6px;
+            color: white;
+            background: #222;
+            border: 1px solid #888;
+            border-radius: 4px;
+        }
+
+        .location-controls button {
+            cursor: pointer;
+        }
+
+        #locationMessage {
+            padding: 0 8px;
+            font-size: 12px;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            table-layout: fixed;
+            text-align: center;
+        }
+
+        th,
+        td {
+            padding: 6px 2px;
+            overflow-wrap: anywhere;
+        }
+
+        thead th {
+            font-size: clamp(6px, 2vw, 12px);
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+
+        td {
+            font-size: clamp(6px, 2vw, 13px);
+        }
+
+        .date-row td {
+            color: white;
+            font-size: clamp(6px, 2vw, 12px);
+            text-align: left;
+            padding: 10px 0 0 0;
+        }
+
+        td.current-hour {
+            position: relative;
+        }
+
+        td.current-hour::after {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: var(--current-minute);
+            width: 1px;
+            background: white;
+            content: "";
+            pointer-events: none;
+        }
+
+        .hourly-details {
+            display: block;
+            margin-top: 2px;
+            font-size: clamp(5px, 1.7vw, 11px);
+        }
+
+        .weather-shading {
+            background-image:
+                var(--twilight-gradient),
+                linear-gradient(to top,
+                    rgba(0, 0, 0, 0.35) 0,
+                    rgba(0, 0, 0, 0.35) var(--cloud-cover, 0%),
+                    transparent var(--cloud-cover, 0%),
+                    transparent 100%),
+                linear-gradient(to top,
+                    rgba(37, 99, 235, 0.65) 0,
+                    rgba(37, 99, 235, 0.65) var(--rain-chance, 0%),
+                    transparent var(--rain-chance, 0%),
+                    transparent 100%),
+                linear-gradient(90deg,
+                    var(--temperature-left),
+                    var(--temperature-middle),
+                    var(--temperature-right));
+        }
+
+        .legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-top: 20px;
+            font-size: 13px;
+        }
+
+        .legend span {
+            padding: 7px 12px;
+            border-radius: 5px;
+        }
+
+        @media (max-width: 600px) {
+            body {
+                padding: 5px;
+            }
+
+            th,
+            td {
+                padding-left: 0;
+                padding-right: 0;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <form id="locationForm" class="location-controls">
+        <label>
+            Latitude
+            <input id="latitude" type="number" step="any" min="-90" max="90" required>
+        </label>
+        <label>
+            Longitude
+            <input id="longitude" type="number" step="any" min="-180" max="180" required>
+        </label>
+        <button type="submit">Save location</button>
+    </form>
+    <div id="locationMessage" role="status" aria-live="polite"></div>
+
+    <table id="forecastTable">
+        <thead>
+            <tr id="headerRow">
+                <th colspan="24">Hours</th>
+            </tr>
+        </thead>
+        <tbody id="forecastBody"></tbody>
+    </table>
+
+    <script src="https://unpkg.com/suncalc@1.9.0/suncalc.js"></script>
+    <script>
+        const locationStorageKey = "weatherForecastLocation";
+        const locationForm = document.getElementById("locationForm");
+        const latitudeInput = document.getElementById("latitude");
+        const longitudeInput = document.getElementById("longitude");
+        const locationMessage = document.getElementById("locationMessage");
+        let savedLocation = null;
+
+        const temperatureStops = [
+            { temperature: -10, color: [255, 255, 255] },
+            { temperature: 0, color: [89, 192, 240] },
+            { temperature: 10, color: [158, 231, 143] },
+            { temperature: 20, color: [255, 217, 127] },
+            { temperature: 30, color: [249, 78, 78] },
+            { temperature: 40, color: [202, 82, 154] }
+        ];
+
+        function temperatureColor(temperature, stops = temperatureStops) {
+            if (stops.length === 0) {
+                throw new RangeError("At least one temperature stop is required.");
+            }
+
+            const first = stops[0];
+            const last = stops[stops.length - 1];
+            const boundedTemperature = Math.max(
+                first.temperature,
+                Math.min(last.temperature, temperature)
+            );
+            let color = first.color;
+
+            if (stops.length > 1) {
+                const matchingEndIndex = stops.findIndex(
+                    (stop, index) => index > 0 && boundedTemperature <= stop.temperature
+                );
+                const endIndex = matchingEndIndex === -1
+                    ? stops.length - 1
+                    : matchingEndIndex;
+                const start = stops[endIndex - 1];
+                const end = stops[endIndex];
+                const ratio =
+                    (boundedTemperature - start.temperature) /
+                    (end.temperature - start.temperature);
+                color = start.color.map((channel, index) =>
+                    Math.round(channel + (end.color[index] - channel) * ratio)
+                );
+            }
+
+            return `color-mix(in srgb, rgb(${color.join(", ")}) 80%, black)`;
+        }
+
+        function localForecastDateTime(date, minuteOfDay, formatter) {
+            const [year, month, day] = date.split("-").map(Number);
+            const localTimestamp = Date.UTC(year, month - 1, day, 0, minuteOfDay);
+            let timestamp = localTimestamp;
+
+            for (let attempt = 0; attempt < 3; attempt++) {
+                const parts = Object.fromEntries(
+                    formatter.formatToParts(new Date(timestamp))
+                        .filter(part => part.type !== "literal")
+                        .map(part => [part.type, Number(part.value)])
+                );
+                const formattedAsUtc = Date.UTC(
+                    parts.year,
+                    parts.month - 1,
+                    parts.day,
+                    parts.hour,
+                    parts.minute
+                );
+                const adjustment = localTimestamp - formattedAsUtc;
+                timestamp += adjustment;
+                if (adjustment === 0) {
+                    break;
+                }
+            }
+
+            return timestamp;
+        }
+
+        function twilightOpacity(altitudeDegrees) {
+            if (altitudeDegrees >= 0) return 0;
+            if (altitudeDegrees >= -6) return 0.2;
+            if (altitudeDegrees >= -12) return 0.4;
+            return 0.6;
+        }
+
+        function twilightGradient(date, hour, latitude, longitude, timeZone) {
+            const formatter = new Intl.DateTimeFormat("en-CA", {
+                timeZone,
+                year: "numeric",
+                month: "2-digit",
+                day: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit",
+                hourCycle: "h23"
+            });
+            const startTime = localForecastDateTime(date, hour * 60, formatter);
+            const samples = [];
+            const sampleMinutes = 5;
+
+            for (let minute = 0; minute <= 60; minute += sampleMinutes) {
+                const timestamp = startTime + minute * 60_000;
+                const altitude = window.SunCalc.getPosition(
+                    new Date(timestamp),
+                    latitude,
+                    longitude
+                ).altitude * 180 / Math.PI;
+                samples.push({ timestamp, altitude });
+            }
+
+            const thresholds = [0, -6, -12, -18];
+            const stops = samples.map(sample => ({
+                timestamp: sample.timestamp,
+                opacity: twilightOpacity(sample.altitude)
+            }));
+
+            for (let index = 1; index < samples.length; index++) {
+                const before = samples[index - 1];
+                const after = samples[index];
+
+                for (const threshold of thresholds) {
+                    if ((before.altitude - threshold) * (after.altitude - threshold) >= 0) {
+                        continue;
+                    }
+
+                    let low = before.timestamp;
+                    let high = after.timestamp;
+                    let lowAltitude = before.altitude;
+
+                    for (let iteration = 0; iteration < 16; iteration++) {
+                        const middle = (low + high) / 2;
+                        const middleAltitude = window.SunCalc.getPosition(
+                            new Date(middle),
+                            latitude,
+                            longitude
+                        ).altitude * 180 / Math.PI;
+
+                        if ((lowAltitude < threshold) === (middleAltitude < threshold)) {
+                            low = middle;
+                            lowAltitude = middleAltitude;
+                        } else {
+                            high = middle;
+                        }
+                    }
+
+                    stops.push({
+                        timestamp: (low + high) / 2,
+                        opacity: twilightOpacity(threshold)
+                    });
+                }
+            }
+
+            const uniqueStops = [...new Map(
+                stops
+                    .sort((a, b) => a.timestamp - b.timestamp)
+                    .map(stop => [Math.round(stop.timestamp), stop])
+            ).values()];
+            const gradientStops = uniqueStops.map(stop => {
+                const position = ((stop.timestamp - startTime) / 3_600_000) * 100;
+                return `rgba(0, 0, 0, ${stop.opacity.toFixed(4)}) ${position.toFixed(4)}%`;
+            });
+
+            return `linear-gradient(90deg, ${gradientStops.join(", ")})`;
+        }
+
+        function isValidLocation(location) {
+            return location &&
+                Number.isFinite(location.latitude) &&
+                location.latitude >= -90 &&
+                location.latitude <= 90 &&
+                Number.isFinite(location.longitude) &&
+                location.longitude >= -180 &&
+                location.longitude <= 180;
+        }
+
+        function setLocationMessage(message) {
+            locationMessage.textContent = message;
+        }
+
+        async function loadForecast(latitude, longitude) {
+
+            const headerRow = document.getElementById("headerRow");
+            const tbody = document.getElementById("forecastBody");
+
+            tbody.innerHTML = "";
+
+            try {
+                const url = new URL(
+                    "https://api.open-meteo.com/v1/forecast"
+                );
+
+                url.search = new URLSearchParams({
+                    latitude,
+                    longitude,
+                    hourly: "temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover",
+                    daily: "sunrise,sunset,uv_index_max,precipitation_sum",
+                    forecast_days: "14",
+                    timezone: "auto"
+                });
+
+                const response = await fetch(url);
+
+                if (!response.ok) {
+                    throw new Error("Weather API request failed.");
+                }
+
+                const data = await response.json();
+
+                const times = data.hourly.time;
+                const temperatures = data.hourly.temperature_2m;
+                const relativeHumidities = data.hourly.relative_humidity_2m;
+                const precipitationProbabilities =
+                    data.hourly.precipitation_probability;
+                const precipitations = data.hourly.precipitation;
+                const cloudCovers = data.hourly.cloud_cover;
+                const sunTimesByDate = Object.fromEntries(
+                    data.daily.time.map((date, index) => [
+                        date,
+                        {
+                            sunrise: data.daily.sunrise[index],
+                            sunset: data.daily.sunset[index],
+                            uvIndexMax: data.daily.uv_index_max[index],
+                            precipitationSum: data.daily.precipitation_sum[index]
+                        }
+                    ])
+                );
+                const currentTimeParts = new Intl.DateTimeFormat("en-CA", {
+                    timeZone: data.timezone,
+                    year: "numeric",
+                    month: "2-digit",
+                    day: "2-digit",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    hourCycle: "h23"
+                }).formatToParts(new Date());
+                const currentTime = Object.fromEntries(
+                    currentTimeParts
+                        .filter(part => part.type !== "literal")
+                        .map(part => [part.type, part.value])
+                );
+                const currentDate = `${currentTime.year}-${currentTime.month}-${currentTime.day}`;
+                const currentHour = Number(currentTime.hour);
+                const currentMinute = Number(currentTime.minute);
+
+                // Create hourly table headers
+                headerRow.innerHTML = "";
+
+                for (let hour = 0; hour < 24; hour++) {
+                    const th = document.createElement("th");
+                    th.textContent = hour;
+                    th.title = `${String(hour).padStart(2, "0")}:00`;
+                    headerRow.appendChild(th);
+                }
+
+                // Group hourly data by date
+                const days = {};
+
+                times.forEach((time, index) => {
+                    const [date, hour] = time.split("T");
+                    const temperature = temperatures[index];
+                    const previousTemperature = temperatures[index - 1];
+                    const nextTemperature = temperatures[index + 1];
+
+                    if (!days[date]) {
+                        days[date] = {};
+                    }
+
+                    days[date][parseInt(hour.split(":")[0])] = {
+                        temperature,
+                        leftTemperature: Number.isFinite(previousTemperature)
+                            ? (previousTemperature + temperature) / 2
+                            : temperature,
+                        middleTemperature: temperature,
+                        rightTemperature: Number.isFinite(nextTemperature)
+                            ? (temperature + nextTemperature) / 2
+                            : temperature,
+                        relativeHumidity: relativeHumidities[index],
+                        precipitationProbability:
+                            precipitationProbabilities[index],
+                        precipitation: precipitations[index],
+                        cloudCover: cloudCovers[index]
+                    };
+                });
+
+                // Render one row per day
+                Object.entries(days).forEach(([date, hours]) => {
+                    const dateRow = document.createElement("tr");
+                    dateRow.className = "date-row";
+                    const dateCell = document.createElement("td");
+                    dateCell.colSpan = 24;
+                    const dateLabel = new Date(
+                        date + "T12:00:00"
+                    ).toLocaleDateString("en-GB", {
+                        weekday: "short",
+                        day: "2-digit",
+                        month: "2-digit"
+                    });
+                    const sunTimes = sunTimesByDate[date];
+                    const sunrise = sunTimes?.sunrise?.split("T")[1] ?? "—";
+                    const sunset = sunTimes?.sunset?.split("T")[1] ?? "—";
+                    const uvIndex = sunTimes?.uvIndexMax ?? "—";
+                    const precipitationSum = sunTimes?.precipitationSum ?? "—";
+                    dateCell.textContent =
+                        `${dateLabel} ▲ ${sunrise} ` +
+                        `▼ ${sunset}`;
+
+                    if (sunTimes?.precipitationSum) dateCell.textContent += `💧${precipitationSum.toFixed(0)}`;
+                    if (sunTimes?.uvIndexMax > 3) dateCell.textContent += ` ☀ ${uvIndex}`;
+
+                    dateRow.appendChild(dateCell);
+                    tbody.appendChild(dateRow);
+
+                    const tr = document.createElement("tr");
+
+                    let previousCellTemperature = null
+                    for (let hour = 0; hour < 24; hour++) {
+                        const td = document.createElement("td");
+
+                        const forecast = hours[hour];
+
+                        if (
+                            forecast === undefined ||
+                            forecast.temperature === undefined ||
+                            forecast.temperature === null
+                        ) {
+                            td.textContent = "—";
+                        } else {
+                            const temperature = forecast.temperature.toFixed(0);
+                            if (temperature !== previousCellTemperature) {
+                                td.textContent = temperature
+                                previousCellTemperature = temperature
+                            } else {
+                                td.textContent = " "
+                            }
+
+                            const canDryLaundry =
+                                forecast.relativeHumidity !== undefined &&
+                                forecast.relativeHumidity !== null
+                                && forecast.relativeHumidity < 60;
+                            const veryHumid =
+                                forecast.relativeHumidity !== undefined &&
+                                forecast.relativeHumidity !== null
+                                && forecast.relativeHumidity > 90;
+                            const precipitationDetails =
+                                document.createElement("span");
+                            precipitationDetails.className = "hourly-details";
+                            precipitationDetails.textContent = forecast.precipitation ?
+                                `${forecast.precipitation ?? "—"}` : canDryLaundry ? "•" : veryHumid ? "-" : " ";
+                            td.appendChild(precipitationDetails);
+
+                            td.style.setProperty(
+                                "--temperature-left",
+                                temperatureColor(forecast.leftTemperature)
+                            );
+                            td.style.setProperty(
+                                "--temperature-middle",
+                                temperatureColor(forecast.middleTemperature)
+                            );
+                            td.style.setProperty(
+                                "--temperature-right",
+                                temperatureColor(forecast.rightTemperature)
+                            );
+
+                            if (date === currentDate && hour === currentHour) {
+                                td.classList.add("current-hour");
+                                td.style.setProperty(
+                                    "--current-minute",
+                                    `${(currentMinute / 60) * 100}%`
+                                );
+                            }
+
+                            const cloudCover = Number.isFinite(forecast.cloudCover)
+                                ? Math.max(0, Math.min(100, forecast.cloudCover))
+                                : 0;
+                            const rainChance = Number.isFinite(
+                                forecast.precipitationProbability
+                            )
+                                ? Math.max(
+                                    0,
+                                    Math.min(100, forecast.precipitationProbability)
+                                )
+                                : 0;
+
+                            td.style.setProperty("--cloud-cover", `${cloudCover}%`);
+                            td.style.setProperty("--rain-chance", `${rainChance}%`);
+
+                            td.style.setProperty(
+                                "--twilight-gradient",
+                                twilightGradient(
+                                    date,
+                                    hour,
+                                    latitude,
+                                    longitude,
+                                    data.timezone
+                                )
+                            );
+                            td.classList.add("weather-shading");
+
+                            td.title =
+                                `${date} ${hour}:00 - ${forecast.temperature}°C, ` +
+                                `rain chance ${forecast.precipitationProbability ?? "—"}%, ` +
+                                `precipitation ${forecast.precipitation ?? "—"} mm, ` +
+                                `cloud cover ${forecast.cloudCover ?? "—"}%, ` +
+                                `relative humidity ${forecast.relativeHumidity ?? "—"}%`;
+                        }
+
+                        tr.appendChild(td);
+                    }
+
+                    tbody.appendChild(tr);
+                });
+
+            } catch (error) {
+                console.error(error);
+                setLocationMessage(`Unable to load forecast: ${error.message}`);
+            }
+        }
+
+        locationForm.addEventListener("submit", event => {
+            event.preventDefault();
+
+            const location = {
+                latitude: Number(latitudeInput.value),
+                longitude: Number(longitudeInput.value)
+            };
+
+            if (!isValidLocation(location)) {
+                setLocationMessage("Enter a valid latitude and longitude.");
+                return;
+            }
+
+            savedLocation = location;
+            let persistenceWarning = "";
+
+            try {
+                localStorage.setItem(locationStorageKey, JSON.stringify(location));
+            } catch (error) {
+                console.error("Could not save location in browser storage.", error);
+                persistenceWarning =
+                    " Location could not be saved for future sessions.";
+            }
+
+            locationForm.hidden = true;
+            setLocationMessage(persistenceWarning.trim());
+            loadForecast(location.latitude, location.longitude);
+        });
+
+        function toggleLocationForm() {
+            if (!savedLocation) {
+                return;
+            }
+
+            locationForm.hidden = !locationForm.hidden;
+            if (!locationForm.hidden) {
+                latitudeInput.value = savedLocation.latitude;
+                longitudeInput.value = savedLocation.longitude;
+            }
+        }
+
+        let lastTap = null;
+        let ignoreTouchGeneratedDblClick = false;
+
+        document.addEventListener("dblclick", () => {
+            if (ignoreTouchGeneratedDblClick) {
+                ignoreTouchGeneratedDblClick = false;
+                return;
+            }
+
+            toggleLocationForm();
+        });
+
+        document.addEventListener("touchend", event => {
+            if (event.changedTouches.length !== 1) {
+                lastTap = null;
+                return;
+            }
+
+            const touch = event.changedTouches[0];
+            const now = Date.now();
+            const isDoubleTap = lastTap &&
+                now - lastTap.time < 400 &&
+                Math.hypot(
+                    touch.clientX - lastTap.x,
+                    touch.clientY - lastTap.y
+                ) < 30;
+
+            if (isDoubleTap) {
+                toggleLocationForm();
+                lastTap = null;
+                ignoreTouchGeneratedDblClick = true;
+                setTimeout(() => {
+                    ignoreTouchGeneratedDblClick = false;
+                }, 500);
+            } else {
+                lastTap = {
+                    time: now,
+                    x: touch.clientX,
+                    y: touch.clientY
+                };
+            }
+        });
+
+        try {
+            const storedLocation = localStorage.getItem(locationStorageKey);
+            if (storedLocation !== null) {
+                const location = JSON.parse(storedLocation);
+                if (isValidLocation(location)) {
+                    savedLocation = location;
+                    locationForm.hidden = true;
+                    loadForecast(location.latitude, location.longitude);
+                } else {
+                    setLocationMessage(
+                        "Saved location is invalid. Enter your coordinates again."
+                    );
+                }
+            }
+        } catch (error) {
+            console.error("Could not read the saved location.", error);
+            setLocationMessage(
+                "Browser storage is unavailable. Enter coordinates to load the forecast."
+            );
+        }
+
+        if ("serviceWorker" in navigator) {
+            window.addEventListener("load", () => {
+                navigator.serviceWorker.register("./sw.js").catch(error => {
+                    console.error("Could not register the app service worker.", error);
+                });
+            });
+        }
+    </script>
+
+</body>
+
+</html>
